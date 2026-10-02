@@ -1,544 +1,975 @@
-# Part 83: CSV
+# ตอนที่ 83: CSV ใน Crystal
 
 ## บทนำ
 
-CSV (Comma-Separated Values) เป็น format ธรรมดาสำหรับ tabular data Crystal มี standard library `csv` ที่รองรับ parsing และ generating CSV ครบถ้วน
+CSV (Comma-Separated Values) เป็นรูปแบบไฟล์ที่นิยมใช้สำหรับการนำเข้าและส่งออกข้อมูลตาราง Crystal มี built-in support สำหรับ CSV ผ่าน `require "csv"` ที่รองรับทั้งการอ่าน, เขียน และจัดการข้อมูล CSV
 
 ---
 
-## 1. require "csv" และ CSV.parse
+## 1. การ require "csv"
 
 ```crystal
 require "csv"
-
-# parse CSV string
-csv_str = "Alice,30,Bangkok\nBob,25,Chiang Mai\nCarol,35,Phuket"
-CSV.parse(csv_str).each do |row|
-  puts "Name: #{row[0]}, Age: #{row[1]}, City: #{row[2]}"
-end
-
-# CSV.parse คืน Array(Array(String))
-rows = CSV.parse(csv_str)
-puts rows.size       # => 3
-puts rows[0].inspect # => ["Alice", "30", "Bangkok"]
-
-# Parse กับ headers
-csv_with_headers = "name,age,city\nAlice,30,Bangkok\nBob,25,Chiang Mai"
-rows = CSV.parse(csv_with_headers)
-headers = rows.first
-data = rows[1..]
-
-data.each do |row|
-  record = headers.zip(row).to_h
-  puts record.inspect
-end
-
-# Quoted fields
-csv_str = %("Alice, Jr.",30,"Bangkok, Thailand"\n"Bob ""The Builder""",25,Phuket)
-CSV.parse(csv_str).each do |row|
-  puts row.inspect
-end
-# => ["Alice, Jr.", "30", "Bangkok, Thailand"]
-# => ["Bob \"The Builder\"", "25", "Phuket"]
-
-# Custom separator
-tsv_str = "Alice\t30\tBangkok\nBob\t25\tChiang Mai"
-CSV.parse(tsv_str, separator: '\t').each do |row|
-  puts row.inspect
-end
 ```
 
 ---
 
-## 2. CSV.each_row
+## 2. CSV.parse - การแปลง CSV String เป็น Array
+
+`CSV.parse` แปลง CSV string ทั้งหมดเป็น `Array(Array(String))`:
 
 ```crystal
 require "csv"
 
-# วนลูปผ่านแต่ละแถว (memory efficient)
-csv_data = "Alice,30\nBob,25\nCarol,35\n"
+csv_string = "สมชาย,30,กรุงเทพ\nมานี,25,เชียงใหม่\nวิชัย,35,ขอนแก่น"
 
-CSV.each_row(csv_data) do |row|
-  puts "#{row[0]}: #{row[1]}"
+rows = CSV.parse(csv_string)
+puts rows.class  # => Array(Array(String))
+puts rows.size   # => 3
+
+rows.each do |row|
+  puts "#{row[0]}, #{row[1]} ปี, #{row[2]}"
+end
+```
+
+### การ parse CSV พร้อม headers:
+
+```crystal
+require "csv"
+
+csv_with_headers = "name,age,city\nสมชาย,30,กรุงเทพ\nมานี,25,เชียงใหม่"
+
+rows = CSV.parse(csv_with_headers, headers: true)
+rows.each do |row|
+  puts "ชื่อ: #{row[0]}, อายุ: #{row[1]}, เมือง: #{row[2]}"
 end
 
-# จาก IO
-csv_io = IO::Memory.new("Alice,30\nBob,25\n")
-CSV.each_row(csv_io) do |row|
-  puts row.inspect
-end
-
-# กับ File
-# CSV.each_row(File.read("data.csv")) do |row|
-#   process(row)
-# end
-
-# กรองข้อมูล
-csv_data = "Alice,30,developer\nBob,25,designer\nCarol,35,developer\n"
-
-developers = [] of Array(String)
-CSV.each_row(csv_data) do |row|
-  developers << row if row[2] == "developer"
-end
-developers.each { |r| puts r.inspect }
-
-# นับแถว
-count = 0
-CSV.each_row(csv_data) { count += 1 }
-puts "Total rows: #{count}"
-
-# จัดเก็บเฉพาะบาง columns
-CSV.each_row(csv_data) do |row|
-  puts "#{row[0]} (#{row[2]})"  # name, role
-end
+# แถวแรกจะถูกข้ามไปเพราะเป็น header
+puts "จำนวนแถวข้อมูล: #{rows.size}"  # => 2
 ```
 
 ---
 
-## 3. CSV.build
+## 3. CSV.each_row - การอ่านทีละแถว
+
+`CSV.each_row` ประหยัดหน่วยความจำกว่า parse เพราะอ่านทีละแถว:
 
 ```crystal
 require "csv"
 
-# สร้าง CSV string
-result = CSV.build do |csv|
-  csv.row "name", "age", "city"  # header
-  csv.row "Alice", 30, "Bangkok"
-  csv.row "Bob", 25, "Chiang Mai"
-  csv.row "Carol", 35, "Phuket"
-end
-
-puts result
-
-# build กับ IO
-output = IO::Memory.new
-CSV.build(output) do |csv|
-  csv.row "id", "product", "price"
-  csv.row 1, "Apple", 15.50
-  csv.row 2, "Banana", 8.00
-  csv.row 3, "Cherry", 35.00
-end
-puts output.to_s
-
-# Custom separator และ quote char
-result = CSV.build(separator: '\t') do |csv|
-  csv.row "Alice", "30", "Bangkok"
-  csv.row "Bob", "25", "Chiang Mai"
-end
-puts result.inspect  # TSV output
-
-# Quoting ค่าที่มีตัวอักษรพิเศษ
-result = CSV.build do |csv|
-  csv.row "Alice, Jr.", "Bangkok, Thailand", "Has \"quotes\""
-end
-puts result  # => "Alice, Jr.","Bangkok, Thailand","Has ""quotes"""
-```
-
----
-
-## 4. Reading CSV Files
-
-```crystal
-require "csv"
-
-# สร้าง test CSV file
-File.write("/tmp/test.csv", <<-CSV)
-  name,age,department,salary
-  Alice,30,Engineering,75000
-  Bob,25,Design,55000
-  Carol,35,Engineering,85000
-  Dave,28,Marketing,60000
-  Eve,32,Design,65000
+csv_data = <<-CSV
+  ชื่อ,คะแนน,เกรด
+  สมชาย,85,B
+  มานี,95,A
+  วิชัย,72,C+
+  สมศรี,91,A
   CSV
 
-# อ่าน CSV file
-rows = CSV.parse(File.read("/tmp/test.csv"))
-headers = rows.first
-puts "Headers: #{headers.inspect}"
-
-data = rows[1..]
-puts "\nAll employees:"
-data.each do |row|
-  puts "  #{row[0]} (#{row[2]}): #{row[1]} years, ฿#{row[3]}"
+CSV.each_row(csv_data) do |row|
+  puts "#{row[0]}: #{row[1]} (#{row[2]})"
 end
-
-# กรองตาม department
-puts "\nEngineers:"
-data.select { |r| r[2] == "Engineering" }.each do |r|
-  puts "  #{r[0]}"
-end
-
-# หาเงินเดือนเฉลี่ย
-salaries = data.map { |r| r[3].to_f }
-avg = salaries.sum / salaries.size
-puts "\nAverage salary: ฿#{avg.round(2)}"
-
-# Sort ตาม salary
-sorted = data.sort_by { |r| r[3].to_i }
-puts "\nBy salary (ascending):"
-sorted.each { |r| puts "  #{r[0]}: ฿#{r[3]}" }
-
-File.delete("/tmp/test.csv")
 ```
 
----
-
-## 5. Writing CSV Files
+### ข้ามแถว header:
 
 ```crystal
 require "csv"
 
-# เขียน CSV file
-File.open("/tmp/output.csv", "w") do |file|
-  CSV.build(file) do |csv|
-    # Headers
-    csv.row "ID", "Name", "Email", "Score", "Grade"
-    
-    # Data
-    students = [
-      {1, "Alice", "alice@school.com", 95, "A"},
-      {2, "Bob", "bob@school.com", 82, "B"},
-      {3, "Carol", "carol@school.com", 78, "C"},
-      {4, "Dave", "dave@school.com", 91, "A"},
-    ]
-    
-    students.each do |(id, name, email, score, grade)|
-      csv.row id, name, email, score, grade
-    end
+csv_data = "name,score,grade\nสมชาย,85,B\nมานี,95,A\nวิชัย,72,C+"
+
+first_row = true
+CSV.each_row(csv_data) do |row|
+  if first_row
+    puts "Headers: #{row.join(", ")}"
+    first_row = false
+    next
   end
+  puts "#{row[0]}: #{row[1]} (#{row[2]})"
+end
+```
+
+---
+
+## 4. การอ่าน CSV Files
+
+```crystal
+require "csv"
+
+# จำลองเนื้อหาไฟล์ CSV
+file_content = <<-CSV
+  id,product_name,price,quantity,category
+  1,แล็ปท็อป Asus,25000,5,electronics
+  2,โทรศัพท์ Samsung,15000,10,electronics
+  3,หูฟัง Sony,3500,20,accessories
+  4,เมาส์ Logitech,800,50,accessories
+  5,คีย์บอร์ด Mechanical,2500,15,accessories
+  CSV
+
+# อ่านทั้งหมดพร้อมกัน
+rows = CSV.parse(file_content)
+
+# แถวแรกคือ header
+headers = rows.first
+puts "Columns: #{headers.join(" | ")}"
+
+# แถวที่เหลือคือข้อมูล
+data_rows = rows[1..]
+data_rows.each do |row|
+  id       = row[0]
+  name     = row[1]
+  price    = row[2].to_i
+  quantity = row[3].to_i
+  category = row[4]
+
+  total_value = price * quantity
+  puts "#{id}. #{name} (#{category}): #{price} บาท x #{quantity} = #{total_value} บาท"
 end
 
-puts File.read("/tmp/output.csv")
-File.delete("/tmp/output.csv")
+# คำนวณมูลค่ารวม
+total = data_rows.sum { |row| row[2].to_i * row[3].to_i }
+puts "\nมูลค่าสินค้าคงคลังรวม: #{total} บาท"
+```
 
-# Append to existing CSV
-def append_to_csv(path : String, row : Array(_))
-  File.open(path, "a") do |file|
-    CSV.build(file) do |csv|
-      csv.row *row
-    end
-  end
-end
+### การอ่าน CSV file จริง:
 
-# CSV export ของ struct/class
-struct Employee
-  getter id : Int32
-  getter name : String
-  getter department : String
-  getter salary : Float64
-  
-  def initialize(@id, @name, @department, @salary)
-  end
-  
-  def to_csv_row : Array(String)
-    [@id.to_s, @name, @department, @salary.to_s]
-  end
-end
+```crystal
+require "csv"
 
-employees = [
-  Employee.new(1, "Alice", "Engineering", 75000.0),
-  Employee.new(2, "Bob", "Design", 55000.0),
-  Employee.new(3, "Carol", "Engineering", 85000.0),
+# วิธีอ่านจาก file จริง
+# File.open("products.csv") do |file|
+#   CSV.each_row(file) do |row|
+#     # process each row
+#   end
+# end
+
+# หรืออ่านทั้งไฟล์
+# content = File.read("products.csv")
+# rows = CSV.parse(content)
+```
+
+---
+
+## 5. การเขียน CSV ด้วย CSV.build
+
+`CSV.build` ใช้สร้าง CSV string:
+
+```crystal
+require "csv"
+
+students = [
+  {name: "สมชาย", age: 20, gpa: 3.5, major: "Computer Science"},
+  {name: "มานี", age: 21, gpa: 3.8, major: "Mathematics"},
+  {name: "วิชัย", age: 19, gpa: 3.2, major: "Physics"},
+  {name: "สมศรี", age: 22, gpa: 3.9, major: "Chemistry"},
 ]
 
-result = CSV.build do |csv|
-  csv.row "id", "name", "department", "salary"
-  employees.each { |e| csv.row *e.to_csv_row }
+csv_output = CSV.build do |csv|
+  # เขียน header
+  csv.row "name", "age", "gpa", "major"
+
+  # เขียนข้อมูล
+  students.each do |s|
+    csv.row s[:name], s[:age], s[:gpa], s[:major]
+  end
 end
-puts result
+
+puts csv_output
 ```
 
----
-
-## 6. Headers Support
+### เขียน CSV file จริง:
 
 ```crystal
 require "csv"
 
-# ใช้ CSV::Reader กับ headers
-csv_str = "name,age,city\nAlice,30,Bangkok\nBob,25,Chiang Mai\nCarol,35,Phuket\n"
+data = [
+  ["สมชาย", "somchai@example.com", "081-234-5678"],
+  ["มานี", "mani@example.com", "082-345-6789"],
+]
 
-CSV.new(csv_str, headers: true).each do |row|
-  puts "#{row["name"]} is #{row["age"]} from #{row["city"]}"
+# เขียนลงไฟล์
+csv_content = CSV.build do |csv|
+  csv.row "ชื่อ", "อีเมล", "โทรศัพท์"
+  data.each { |row| csv.row(*row) }
 end
 
-# headers as Hash
-records = [] of Hash(String, String)
-CSV.new(csv_str, headers: true).each do |row|
-  record = {} of String => String
-  row.headers.each do |header|
-    record[header] = row[header]
-  end
-  records << record
-end
-
-records.each { |r| puts r.inspect }
-
-# ค้นหาตาม header
-CSV.new(csv_str, headers: true).each do |row|
-  puts row["name"] if row["city"] == "Bangkok"
-end
-
-# สร้าง Array of Hashes จาก CSV
-def csv_to_records(csv_str : String) : Array(Hash(String, String))
-  rows = CSV.parse(csv_str)
-  return [] of Hash(String, String) if rows.empty?
-  
-  headers = rows.first
-  rows[1..].map do |row|
-    hash = {} of String => String
-    headers.each_with_index { |h, i| hash[h] = row[i]? || "" }
-    hash
-  end
-end
-
-records = csv_to_records(csv_str)
-puts records.first.inspect
-puts records.find { |r| r["city"] == "Phuket" }.inspect
+# File.write("contacts.csv", csv_content)
+puts csv_content
 ```
 
 ---
 
-## 7. CSV Transformation
+## 6. CSV กับ Headers
+
+### การใช้ CSV::CSV object:
 
 ```crystal
 require "csv"
 
-# Transform CSV
-def transform_csv(input : String, &block : Array(String) -> Array(String)?) : String
-  rows = CSV.parse(input)
-  return "" if rows.empty?
-  
-  transformed = rows.filter_map { |row| block.call(row) }
-  
+csv_data = <<-CSV
+  id,first_name,last_name,email,department
+  1,สม,ชาย,somchai@company.com,Engineering
+  2,มา,นี,mani@company.com,Marketing
+  3,วิ,ชัย,vichai@company.com,Engineering
+  4,สม,ศรี,somsri@company.com,HR
+  CSV
+
+# สร้าง CSV object พร้อม header support
+csv = CSV.new(csv_data, headers: true)
+
+# เข้าถึงด้วยชื่อ column
+csv.each do |row|
+  id         = row["id"]
+  first_name = row["first_name"]
+  last_name  = row["last_name"]
+  email      = row["email"]
+  dept       = row["department"]
+
+  puts "#{id}: #{first_name} #{last_name} (#{dept}) - #{email}"
+end
+```
+
+### ตรวจสอบ headers:
+
+```crystal
+require "csv"
+
+csv_data = "name,age,city\nสมชาย,30,กรุงเทพ"
+
+csv = CSV.new(csv_data, headers: true)
+puts "Headers: #{csv.headers.inspect}"  # => ["name", "age", "city"]
+```
+
+---
+
+## 7. CSV::Row - การทำงานกับแถว CSV
+
+```crystal
+require "csv"
+
+csv_data = <<-CSV
+  product,price,stock,rating
+  กาแฟอาราบิก้า,250,100,4.8
+  ชาอู่หลง,180,50,4.5
+  น้ำผลไม้รวม,90,200,4.2
+  โกโก้ร้อน,120,75,4.6
+  CSV
+
+csv = CSV.new(csv_data, headers: true)
+
+csv.each do |row|
+  # เข้าถึงด้วย index
+  product = row[0]
+
+  # เข้าถึงด้วย header name
+  price   = row["price"].to_f
+  stock   = row["stock"].to_i
+  rating  = row["rating"].to_f
+
+  # ตรวจสอบสินค้าขายดี
+  status = rating >= 4.5 ? "⭐ ขายดี" : "ปกติ"
+  puts "#{product}: #{price} บาท (คงเหลือ: #{stock}) #{status}"
+end
+```
+
+### Row size และ column count:
+
+```crystal
+require "csv"
+
+csv_data = "a,b,c,d,e\n1,2,3,4,5"
+csv = CSV.new(csv_data, headers: true)
+
+csv.each do |row|
+  puts "จำนวน columns: #{row.size}"
+  puts "Values: #{row.to_a.join(", ")}"
+end
+```
+
+---
+
+## 8. Field Types - การแปลงประเภทข้อมูล
+
+CSV เก็บข้อมูลเป็น String ทั้งหมด ต้องแปลงเอง:
+
+```crystal
+require "csv"
+
+csv_data = <<-CSV
+  name,age,salary,hire_date,active
+  สมชาย ใจดี,35,75000.50,2020-01-15,true
+  มานี สวยงาม,28,65000.00,2021-06-01,true
+  วิชัย เก่งกล้า,42,95000.75,2018-03-20,false
+  CSV
+
+csv = CSV.new(csv_data, headers: true)
+
+csv.each do |row|
+  name      = row["name"]             # String
+  age       = row["age"].to_i         # Int32
+  salary    = row["salary"].to_f      # Float64
+  hire_date = row["hire_date"]        # String (ต้องแปลงเป็น Time เอง)
+  active    = row["active"] == "true" # Bool
+
+  puts "#{name}: อายุ #{age}, เงินเดือน #{salary.format(decimal_places: 2)} บาท"
+  puts "  วันที่เข้างาน: #{hire_date}, สถานะ: #{active ? "ทำงานอยู่" : "ออกแล้ว"}"
+end
+```
+
+### Helper method สำหรับแปลงข้อมูล:
+
+```crystal
+require "csv"
+
+def parse_bool(value : String) : Bool
+  case value.downcase
+  when "true", "yes", "1", "y" then true
+  else false
+  end
+end
+
+def parse_int?(value : String) : Int32?
+  value.to_i?
+end
+
+def parse_float?(value : String) : Float64?
+  value.to_f?
+end
+
+csv_data = "item,count,price,available\napple,10,25.5,yes\nbanana,0,15.0,no\ncherry,5,80.0,true"
+
+csv = CSV.new(csv_data, headers: true)
+csv.each do |row|
+  name  = row["item"]
+  count = parse_int?(row["count"]) || 0
+  price = parse_float?(row["price"]) || 0.0
+  avail = parse_bool(row["available"])
+
+  puts "#{name}: #{count} ชิ้น, #{price} บาท, #{avail ? "มีสินค้า" : "หมด"}"
+end
+```
+
+---
+
+## 9. Quoted Fields - ฟิลด์ที่มี Special Characters
+
+CSV รองรับ quoted fields สำหรับข้อมูลที่มีเครื่องหมายจุลภาค หรือ newlines:
+
+```crystal
+require "csv"
+
+# ฟิลด์ที่มี comma ต้อง quote
+csv_data = <<-CSV
+  name,address,phone
+  สมชาย,"123, ถนนสุขุมวิท, กรุงเทพ",081-234-5678
+  มานี,"456 ถนนนิมมาน, เชียงใหม่",082-345-6789
+  วิชัย,"789 ถนนมิตรภาพ, ขอนแก่น",083-456-7890
+  CSV
+
+csv = CSV.new(csv_data, headers: true)
+csv.each do |row|
+  puts "#{row["name"]}: #{row["address"]}"
+end
+```
+
+### ฟิลด์ที่มี quotation marks:
+
+```crystal
+require "csv"
+
+# ใช้ "" เพื่อ escape " ใน quoted field
+csv_data = %(name,description\nสินค้า A,"สินค้า ""พิเศษ"" ราคาถูก"\nสินค้า B,ปกติธรรมดา)
+
+csv = CSV.new(csv_data, headers: true)
+csv.each do |row|
+  puts "#{row["name"]}: #{row["description"]}"
+end
+```
+
+### ฟิลด์ที่มี newlines:
+
+```crystal
+require "csv"
+
+# ฟิลด์ที่มี newline ต้อง wrap ใน quotes
+csv_data = "title,content\nข่าวที่ 1,\"บรรทัดที่ 1\nบรรทัดที่ 2\nบรรทัดที่ 3\"\nข่าวที่ 2,ข้อความปกติ"
+
+csv = CSV.new(csv_data, headers: true)
+csv.each do |row|
+  puts "Title: #{row["title"]}"
+  puts "Content:"
+  row["content"].split("\n").each { |line| puts "  #{line}" }
+  puts ""
+end
+```
+
+---
+
+## 10. Custom Separator - ตัวคั่นที่กำหนดเอง
+
+```crystal
+require "csv"
+
+# TSV (Tab-Separated Values)
+tsv_data = "name\tage\tcity\nสมชาย\t30\tกรุงเทพ\nมานี\t25\tเชียงใหม่"
+
+csv = CSV.new(tsv_data, headers: true, separator: '\t')
+csv.each do |row|
+  puts "#{row["name"]} (#{row["age"]}) - #{row["city"]}"
+end
+```
+
+### Pipe-separated:
+
+```crystal
+require "csv"
+
+# Pipe (|) separator
+pipe_data = "id|name|value\n1|สมชาย|100\n2|มานี|200\n3|วิชัย|300"
+
+csv = CSV.new(pipe_data, headers: true, separator: '|')
+csv.each do |row|
+  puts "#{row["id"]}: #{row["name"]} = #{row["value"]}"
+end
+```
+
+### Semicolon separator (European format):
+
+```crystal
+require "csv"
+
+# European format ใช้ ; เพราะ , ใช้เป็น decimal separator
+euro_data = "Artikel;Preis;Menge\nApfel;1,50;10\nBanane;0,99;20"
+
+csv = CSV.new(euro_data, headers: true, separator: ';')
+csv.each do |row|
+  puts "#{row["Artikel"]}: #{row["Preis"]} (#{row["Menge"]} Stk.)"
+end
+```
+
+---
+
+## 11. Streaming Large Files - การอ่านไฟล์ขนาดใหญ่
+
+สำหรับไฟล์ CSV ขนาดใหญ่ ใช้ streaming เพื่อประหยัดหน่วยความจำ:
+
+```crystal
+require "csv"
+
+# จำลองไฟล์ขนาดใหญ่
+def generate_large_csv(rows : Int32) : String
   CSV.build do |csv|
-    transformed.each { |row| csv.row *row }
-  end
-end
-
-# uppercase ทุก value
-csv_data = "alice,developer,bangkok\nbob,designer,phuket\n"
-result = transform_csv(csv_data) do |row|
-  row.map(&.upcase)
-end
-puts result
-
-# กรองและ transform
-csv_data = "name,age,city\nAlice,30,Bangkok\nBob,25,Chiang Mai\nCarol,35,Phuket\n"
-rows = CSV.parse(csv_data)
-headers = rows.first
-
-result = CSV.build do |csv|
-  csv.row *headers
-  rows[1..].each do |row|
-    age = row[1].to_i
-    csv.row *row if age >= 30
-  end
-end
-puts result
-
-# เพิ่ม computed column
-csv_data = "name,price,quantity\nApple,15,100\nBanana,8,200\nCherry,35,50\n"
-rows = CSV.parse(csv_data)
-headers = rows.first + ["total"]
-
-result = CSV.build do |csv|
-  csv.row *headers
-  rows[1..].each do |row|
-    total = row[1].to_f * row[2].to_i
-    csv.row *(row + [total.to_s])
-  end
-end
-puts result
-
-# Merge two CSVs
-def merge_csv(csv1 : String, csv2 : String, join_col : Int32) : String
-  rows1 = CSV.parse(csv1)
-  rows2 = CSV.parse(csv2)
-  
-  index = {} of String => Array(String)
-  rows2.each { |row| index[row[join_col]] = row }
-  
-  CSV.build do |csv|
-    rows1.each do |row|
-      if match = index[row[join_col]]?
-        csv.row *(row + match[1..])
-      else
-        csv.row *row
-      end
+    csv.row "id", "name", "value", "timestamp"
+    rows.times do |i|
+      csv.row i + 1, "item_#{i + 1}", rand(1000), Time.local.to_s
     end
   end
 end
+
+large_csv = generate_large_csv(10000)
+
+# นับแถว
+row_count = 0
+total_value = 0
+max_value = 0
+min_value = Int32::MAX
+
+first_row = true
+CSV.each_row(large_csv) do |row|
+  if first_row
+    first_row = false
+    next  # ข้าม header
+  end
+
+  row_count += 1
+  value = row[2].to_i
+  total_value += value
+  max_value = value if value > max_value
+  min_value = value if value < min_value
+end
+
+puts "จำนวนแถว: #{row_count}"
+puts "ค่ารวม: #{total_value}"
+puts "ค่าเฉลี่ย: #{total_value / row_count}"
+puts "ค่าสูงสุด: #{max_value}"
+puts "ค่าต่ำสุด: #{min_value}"
+puts "ขนาด CSV: #{large_csv.bytesize / 1024} KB"
 ```
 
----
-
-## 8. Large CSV Files
+### การ filter ระหว่างอ่าน:
 
 ```crystal
 require "csv"
 
-# สร้าง large CSV สำหรับ test
-def generate_test_csv(path : String, rows : Int32)
-  File.open(path, "w") do |file|
-    CSV.build(file) do |csv|
-      csv.row "id", "name", "value", "category"
-      rows.times do |i|
-        csv.row i + 1, "item_#{i + 1}", rand(1000), ["A", "B", "C"].sample
-      end
-    end
+csv_data = <<-CSV
+  name,department,salary,years
+  สมชาย,Engineering,80000,5
+  มานี,Marketing,65000,3
+  วิชัย,Engineering,95000,8
+  สมศรี,HR,55000,2
+  ประยุทธ์,Engineering,110000,12
+  ดวงใจ,Marketing,70000,6
+  CSV
+
+# Filter เฉพาะ Engineering department
+engineering_staff = [] of Array(String)
+
+first_row = true
+CSV.each_row(csv_data) do |row|
+  if first_row
+    first_row = false
+    next
   end
+  engineering_staff << row.to_a if row[1] == "Engineering"
 end
 
-# Process large CSV ทีละแถว (memory efficient)
-def process_large_csv(path : String) : Hash(String, Float64)
-  totals = {} of String => Float64
-  counts = {} of String => Int32
-  
-  # skip header
-  first = true
-  CSV.each_row(File.read(path)) do |row|
-    if first
-      first = false
+puts "Engineering Department:"
+engineering_staff.each do |row|
+  puts "  #{row[0]}: #{row[2].to_i.format} บาท (#{row[3]} ปี)"
+end
+
+total_salary = engineering_staff.sum { |r| r[2].to_i }
+puts "เงินเดือนรวม Engineering: #{total_salary.format} บาท"
+```
+
+---
+
+## 12. การ Transform CSV
+
+### เปลี่ยนรูปแบบข้อมูล:
+
+```crystal
+require "csv"
+
+# Input CSV
+input_csv = <<-CSV
+  first_name,last_name,birth_year,score
+  สม,ชาย,1990,85
+  มา,นี,1995,92
+  วิ,ชัย,1988,78
+  CSV
+
+# Transform เป็น output format ใหม่
+output = CSV.build do |csv|
+  csv.row "full_name", "age", "grade", "passed"
+
+  first_row = true
+  CSV.each_row(input_csv) do |row|
+    if first_row
+      first_row = false
       next
     end
-    
-    category = row[3]
-    value = row[2].to_f
-    
-    totals[category] = (totals[category]? || 0.0) + value
-    counts[category] = (counts[category]? || 0) + 1
-  end
-  
-  # คำนวณ average
-  totals.transform_values.with_index do |total, i|
-    key = totals.keys[i]
-    total / counts[key]
+
+    full_name = "#{row[0]}#{row[1]}"
+    age       = Time.local.year - row[2].to_i
+    score     = row[3].to_i
+    grade     = case score
+                when 90..100 then "A"
+                when 80..89  then "B"
+                when 70..79  then "C"
+                else              "F"
+                end
+    passed    = score >= 70
+
+    csv.row full_name, age, grade, passed
   end
 end
 
-# generate_test_csv("/tmp/large.csv", 10000)
-# averages = process_large_csv("/tmp/large.csv")
-# averages.each { |cat, avg| puts "#{cat}: #{avg.round(2)}" }
+puts output
+```
 
-# Stream processing pattern
-def csv_stream_processor(path : String, batch_size : Int32 = 100, &block : Array(Array(String)) ->)
-  batch = [] of Array(String)
-  first = true
-  
-  CSV.each_row(File.read(path)) do |row|
-    if first
-      first = false
-      next  # skip header
+---
+
+## 13. CSV ที่มีหลาย Sheet (จำลอง)
+
+```crystal
+require "csv"
+
+# จำลองการทำงานกับหลาย CSV sections
+def process_section(csv_string : String, section_name : String)
+  puts "=== #{section_name} ==="
+  rows = CSV.parse(csv_string)
+  return if rows.empty?
+
+  headers = rows.first
+  puts "Columns: #{headers.join(", ")}"
+
+  rows[1..].each do |row|
+    row.each_with_index do |value, i|
+      print "#{headers[i]}: #{value}  "
     end
-    
-    batch << row
-    if batch.size >= batch_size
-      block.call(batch)
-      batch.clear
-    end
+    puts ""
   end
-  
-  block.call(batch) unless batch.empty?
+  puts ""
 end
 
-# ตัวอย่าง CSV validation
-def validate_csv(csv_str : String, expected_columns : Int32) : Array(String)
-  errors = [] of String
-  row_num = 0
-  
-  CSV.each_row(csv_str) do |row|
-    row_num += 1
-    if row.size != expected_columns
-      errors << "Row #{row_num}: expected #{expected_columns} columns, got #{row.size}"
-    end
+sales_csv    = "month,amount,orders\nมกราคม,150000,45\nกุมภาพันธ์,180000,52"
+products_csv = "id,name,price\n1,สินค้า A,500\n2,สินค้า B,750"
+customers_csv = "id,name,total_orders\n1,ลูกค้า A,15\n2,ลูกค้า B,8"
+
+process_section(sales_csv, "Sales")
+process_section(products_csv, "Products")
+process_section(customers_csv, "Customers")
+```
+
+---
+
+## 14. CSV Data Analysis
+
+```crystal
+require "csv"
+
+csv_data = <<-CSV
+  date,category,amount,description
+  2024-01-05,food,350,อาหารกลางวัน
+  2024-01-07,transport,120,ค่าแท็กซี่
+  2024-01-10,food,180,กาแฟและขนม
+  2024-01-12,entertainment,500,ดูหนัง
+  2024-01-15,food,420,อาหารเย็น
+  2024-01-18,transport,85,รถเมล์
+  2024-01-20,shopping,1200,เสื้อผ้า
+  2024-01-22,food,250,อาหารกลางวัน
+  2024-01-25,entertainment,300,คอนเสิร์ต
+  2024-01-28,transport,200,แกร็บ
+  CSV
+
+# วิเคราะห์ข้อมูล
+category_totals = Hash(String, Float64).new(0.0)
+daily_spending  = Hash(String, Float64).new(0.0)
+transactions    = [] of {date: String, category: String, amount: Float64}
+
+first_row = true
+CSV.each_row(csv_data) do |row|
+  if first_row
+    first_row = false
+    next
   end
-  
-  errors
+
+  date     = row[0]
+  category = row[1]
+  amount   = row[2].to_f
+
+  category_totals[category] += amount
+  daily_spending[date] += amount
+  transactions << {date: date, category: category, amount: amount}
 end
 
-good_csv = "a,b,c\n1,2,3\n4,5,6\n"
-bad_csv = "a,b,c\n1,2,3\n4,5\n7,8,9,10\n"
+puts "=== รายงานค่าใช้จ่าย ==="
+puts ""
+puts "รายจ่ายตามหมวดหมู่:"
+category_totals.each do |cat, total|
+  puts "  #{cat}: #{total.format(decimal_places: 2)} บาท"
+end
 
-puts validate_csv(good_csv, 3).inspect  # => []
-puts validate_csv(bad_csv, 3).inspect   # => errors
+total = category_totals.values.sum
+puts "\nยอดรวม: #{total.format(decimal_places: 2)} บาท"
+
+puts "\nวันที่ใช้จ่ายสูงสุด:"
+max_day = daily_spending.max_by { |_, v| v }
+puts "  #{max_day[0]}: #{max_day[1].format(decimal_places: 2)} บาท"
+
+puts "\nค่าเฉลี่ยต่อครั้ง: #{(total / transactions.size).format(decimal_places: 2)} บาท"
+```
+
+---
+
+## 15. การ Generate CSV Report
+
+```crystal
+require "csv"
+
+struct SalesRecord
+  property month : String
+  property product : String
+  property units : Int32
+  property revenue : Float64
+  property cost : Float64
+
+  def initialize(@month, @product, @units, @revenue, @cost)
+  end
+
+  def profit : Float64
+    @revenue - @cost
+  end
+
+  def margin : Float64
+    @revenue > 0 ? (@profit / @revenue * 100).round(2) : 0.0
+  end
+end
+
+records = [
+  SalesRecord.new("มกราคม", "สินค้า A", 150, 75000.0, 45000.0),
+  SalesRecord.new("มกราคม", "สินค้า B", 80,  56000.0, 32000.0),
+  SalesRecord.new("กุมภาพันธ์", "สินค้า A", 120, 60000.0, 36000.0),
+  SalesRecord.new("กุมภาพันธ์", "สินค้า B", 95,  66500.0, 38000.0),
+  SalesRecord.new("มีนาคม", "สินค้า A", 180, 90000.0, 54000.0),
+  SalesRecord.new("มีนาคม", "สินค้า B", 100, 70000.0, 40000.0),
+]
+
+# สร้าง CSV report
+report = CSV.build do |csv|
+  csv.row "เดือน", "สินค้า", "จำนวนหน่วย", "รายได้", "ต้นทุน", "กำไร", "Margin%"
+
+  records.each do |r|
+    csv.row r.month, r.product, r.units, r.revenue, r.cost,
+            r.profit.round(2), r.margin
+  end
+
+  # Summary row
+  total_units   = records.sum(&.units)
+  total_revenue = records.sum(&.revenue)
+  total_cost    = records.sum(&.cost)
+  total_profit  = records.sum(&.profit)
+  avg_margin    = (total_profit / total_revenue * 100).round(2)
+
+  csv.row "รวมทั้งหมด", "", total_units, total_revenue, total_cost,
+          total_profit.round(2), avg_margin
+end
+
+puts report
+```
+
+---
+
+## 16. CSV Filter และ Sort
+
+```crystal
+require "csv"
+
+csv_data = <<-CSV
+  id,name,department,salary,years_of_service
+  1,สมชาย,Engineering,85000,5
+  2,มานี,Marketing,62000,3
+  3,วิชัย,Engineering,95000,8
+  4,สมศรี,HR,58000,2
+  5,ประยุทธ์,Engineering,110000,12
+  6,ดวงใจ,Marketing,72000,6
+  7,นงนุช,HR,65000,4
+  8,อภิชัย,Engineering,78000,4
+  CSV
+
+# โหลดข้อมูล
+employees = [] of Hash(String, String)
+
+csv = CSV.new(csv_data, headers: true)
+csv.each do |row|
+  employee = {} of String => String
+  ["id", "name", "department", "salary", "years_of_service"].each do |h|
+    employee[h] = row[h]
+  end
+  employees << employee
+end
+
+# Filter: Engineering เท่านั้น
+eng = employees.select { |e| e["department"] == "Engineering" }
+
+# Sort: เรียงตาม salary (สูง -> ต่ำ)
+eng.sort_by! { |e| -e["salary"].to_i }
+
+# Output ผลลัพธ์เป็น CSV
+output = CSV.build do |csv|
+  csv.row "อันดับ", "ชื่อ", "เงินเดือน", "อายุงาน"
+  eng.each_with_index do |e, i|
+    csv.row i + 1, e["name"], e["salary"].to_i, "#{e["years_of_service"]} ปี"
+  end
+end
+
+puts "Engineering Department (เรียงตามเงินเดือน):"
+puts output
+```
+
+---
+
+## 17. CSV Merge - การรวมหลาย CSV
+
+```crystal
+require "csv"
+
+# CSV 1: ข้อมูลพนักงาน
+employees_csv = <<-CSV
+  id,name,department
+  1,สมชาย,Engineering
+  2,มานี,Marketing
+  3,วิชัย,HR
+  CSV
+
+# CSV 2: ข้อมูลเงินเดือน
+salaries_csv = <<-CSV
+  employee_id,monthly_salary,bonus
+  1,85000,15000
+  2,62000,8000
+  3,58000,5000
+  CSV
+
+# โหลดข้อมูลพนักงาน
+employees = {} of String => Array(String)
+CSV.each_row(employees_csv) do |row|
+  employees[row[0]] = row.to_a unless row[0] == "id"
+end
+
+# Merge กับ salary data
+merged = CSV.build do |csv|
+  csv.row "id", "name", "department", "monthly_salary", "bonus", "total"
+
+  CSV.each_row(salaries_csv) do |row|
+    next if row[0] == "employee_id"
+
+    emp_id = row[0]
+    if emp = employees[emp_id]?
+      salary    = row[1].to_i
+      bonus     = row[2].to_i
+      total     = salary + bonus
+      csv.row emp_id, emp[1], emp[2], salary, bonus, total
+    end
+  end
+end
+
+puts merged
+```
+
+---
+
+## 18. ตัวอย่างโปรแกรมสมบูรณ์ - Student Grade System
+
+```crystal
+require "csv"
+
+struct Student
+  property id : Int32
+  property name : String
+  property scores : Array(Int32)
+
+  def initialize(@id, @name, @scores)
+  end
+
+  def average : Float64
+    return 0.0 if @scores.empty?
+    (@scores.sum.to_f / @scores.size).round(2)
+  end
+
+  def grade : String
+    avg = average
+    case avg
+    when 90.0..100.0 then "A"
+    when 80.0..89.9  then "B"
+    when 70.0..79.9  then "C"
+    when 60.0..69.9  then "D"
+    else                  "F"
+    end
+  end
+
+  def passed? : Bool
+    average >= 60.0
+  end
+end
+
+# Input: CSV ข้อมูลนักเรียน
+input_csv = <<-CSV
+  id,name,exam1,exam2,exam3,exam4,exam5
+  1,สมชาย ใจดี,85,90,78,92,88
+  2,มานี สวยงาม,72,68,75,80,71
+  3,วิชัย เก่งกล้า,95,98,92,96,94
+  4,สมศรี อ่อนน้อม,55,60,58,62,50
+  5,ประยุทธ์ แข็งแกร่ง,88,85,90,87,91
+  6,ดวงใจ อ่อนหวาน,45,50,48,55,42
+  CSV
+
+students = [] of Student
+
+csv = CSV.new(input_csv, headers: true)
+csv.each do |row|
+  id     = row["id"].to_i
+  name   = row["name"]
+  scores = [
+    row["exam1"].to_i,
+    row["exam2"].to_i,
+    row["exam3"].to_i,
+    row["exam4"].to_i,
+    row["exam5"].to_i,
+  ]
+  students << Student.new(id, name, scores)
+end
+
+# สร้าง report CSV
+report = CSV.build do |csv|
+  csv.row "ลำดับ", "ชื่อ", "สอบ1", "สอบ2", "สอบ3", "สอบ4", "สอบ5",
+          "เฉลี่ย", "เกรด", "ผ่าน/ตก"
+
+  students.each do |s|
+    csv.row s.id, s.name,
+            s.scores[0], s.scores[1], s.scores[2], s.scores[3], s.scores[4],
+            s.average, s.grade, s.passed? ? "ผ่าน" : "ตก"
+  end
+end
+
+puts "=== รายงานผลการเรียน ==="
+puts report
+
+# Statistics
+total     = students.size
+passed    = students.count(&.passed?)
+class_avg = (students.sum(&.average) / total).round(2)
+
+puts "=== สถิติ ==="
+puts "จำนวนนักเรียนทั้งหมด: #{total}"
+puts "ผ่าน: #{passed} คน (#{(passed.to_f / total * 100).round(1)}%)"
+puts "ตก: #{total - passed} คน"
+puts "ค่าเฉลี่ยของชั้น: #{class_avg}"
+
+top_student = students.max_by(&.average)
+puts "นักเรียนที่ได้คะแนนสูงสุด: #{top_student.name} (#{top_student.average})"
 ```
 
 ---
 
 ## แบบฝึกหัด
 
-### แบบฝึกหัดที่ 1
-เขียน `CSVReport` ที่อ่าน CSV file ของ transactions และสร้าง summary report (total, average, min, max ต่อ category)
+### แบบฝึกหัดที่ 1: Inventory Management
+สร้างโปรแกรมอ่าน CSV ต่อไปนี้และ:
+1. หาสินค้าที่ stock น้อยกว่า 10
+2. คำนวณมูลค่ารวมของ inventory
+3. สร้าง CSV report
 
-### แบบฝึกหัดที่ 2
-เขียน `CSVJoiner` ที่ join สอง CSV files บน common column
+```
+id,product_name,price,stock
+1,สินค้า A,500,25
+2,สินค้า B,300,8
+3,สินค้า C,1200,15
+4,สินค้า D,750,5
+5,สินค้า E,200,50
+```
 
-### แบบฝึกหัดที่ 3
-เขียน `CSVValidator` ที่ validate CSV ตาม schema (required columns, types, ranges)
-
-### เฉลย
+### แบบฝึกหัดที่ 2: CSV Transformer
+เขียน function ที่รับ CSV string และ mapping Hash แล้ว return CSV string ใหม่ที่เปลี่ยนชื่อ column:
 
 ```crystal
-require "csv"
-
-# แบบฝึกหัดที่ 1: CSVReport
-struct Stats
-  property total : Float64 = 0.0
-  property count : Int32 = 0
-  property min : Float64 = Float64::INFINITY
-  property max : Float64 = -Float64::INFINITY
-  
-  def add(value : Float64)
-    @total += value
-    @count += 1
-    @min = value if value < @min
-    @max = value if value > @max
-  end
-  
-  def average : Float64
-    @count > 0 ? @total / @count : 0.0
-  end
+def rename_columns(csv : String, mapping : Hash(String, String)) : String
+  # เช่น mapping = {"first_name" => "ชื่อ", "last_name" => "นามสกุล"}
+  # TODO: implement
 end
-
-def csv_report(csv_str : String, category_col : Int32, value_col : Int32) : String
-  rows = CSV.parse(csv_str)
-  return "" if rows.empty?
-  
-  stats = {} of String => Stats
-  
-  rows[1..].each do |row|
-    category = row[category_col]
-    value = row[value_col].to_f
-    stats[category] ||= Stats.new
-    stats[category].add(value)
-  end
-  
-  CSV.build do |csv|
-    csv.row "Category", "Count", "Total", "Average", "Min", "Max"
-    stats.each do |cat, s|
-      csv.row cat, s.count, s.total.round(2), s.average.round(2), s.min.round(2), s.max.round(2)
-    end
-  end
-end
-
-transactions = "date,category,amount\n2024-01-01,Food,150\n2024-01-02,Transport,80\n2024-01-03,Food,200\n2024-01-04,Entertainment,350\n2024-01-05,Transport,60\n2024-01-06,Food,120\n"
-puts csv_report(transactions, 1, 2)
 ```
+
+### แบบฝึกหัดที่ 3: CSV Statistics
+สร้างโปรแกรมที่รับ CSV ที่มี numeric columns และสร้าง statistics summary:
+- min, max, average, sum สำหรับแต่ละ numeric column
+- แสดงผลเป็น CSV
 
 ---
 
 ## สรุป
 
-ในบทนี้เราได้เรียนรู้:
+ในตอนนี้เราได้เรียนรู้:
 
-1. **CSV.parse** - parse CSV string เป็น Array(Array(String))
-2. **CSV.each_row** - วนลูปแบบ memory efficient
-3. **CSV.build** - สร้าง CSV output
-4. **Reading files** - อ่านและประมวลผล CSV files
-5. **Writing files** - เขียน CSV files
-6. **Headers** - จัดการ header row
-7. **Transformation** - filter, transform, merge CSV
-8. **Large files** - batch processing pattern
+1. **`require "csv"`** - การนำเข้า CSV library
+2. **`CSV.parse`** - การแปลง CSV string เป็น `Array(Array(String))`
+3. **`CSV.each_row`** - การอ่าน CSV ทีละแถวแบบ streaming
+4. **การอ่าน CSV files** - อ่านจาก string หรือ IO
+5. **`CSV.build`** - การสร้าง CSV string แบบ programmatic
+6. **Headers** - การทำงานกับ column names
+7. **`CSV::Row`** - การเข้าถึงข้อมูลในแถวด้วย index หรือ name
+8. **Field types** - การแปลง String เป็น Int, Float, Bool
+9. **Quoted fields** - การจัดการ fields ที่มี special characters
+10. **Custom separator** - การใช้ delimiter อื่นนอกจาก comma
+11. **Streaming** - การอ่าน CSV ขนาดใหญ่แบบ memory-efficient
+12. **Data analysis** - การวิเคราะห์และรายงานข้อมูลจาก CSV
 
-CSV เป็น format มาตรฐานสำหรับ data exchange โดยเฉพาะกับ spreadsheet programs และ databases
+CSV ใน Crystal เหมาะสำหรับการ import/export ข้อมูล, data processing, และการ generate reports
