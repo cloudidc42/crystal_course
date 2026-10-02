@@ -1,524 +1,1029 @@
-# Part 154: SQLite - การใช้งาน SQLite ใน Crystal
+# Part 154: Crystal กับ Elasticsearch
 
 ## บทนำ
 
-SQLite เป็น embedded database ที่ไม่ต้องติดตั้ง server แยก เหมาะสำหรับ desktop apps, mobile apps, prototypes และ small web apps
+Elasticsearch เป็น search engine ที่มีประสิทธิภาพสูง เหมาะสำหรับ Full-Text Search, Log Analytics และ Real-time Data Analysis Crystal ไม่มี official shard สำหรับ Elasticsearch แต่เราสามารถใช้ HTTP client ของ Crystal เชื่อมต่อได้โดยตรง ซึ่งทำให้มีความยืดหยุ่นสูง
 
-## การติดตั้ง
+## การตั้งค่า HTTP Client
+
+### shard.yml
 
 ```yaml
 # shard.yml
+name: elasticsearch_app
+version: 1.0.0
+
 dependencies:
-  sqlite3:
-    github: crystal-lang/crystal-sqlite3
-    version: ~> 0.20.0
-  db:
-    github: crystal-lang/crystal-db
-    version: ~> 0.13.0
+  http:
+    github: crystal-lang/crystal
+    version: "*"
 ```
 
-## เชื่อมต่อ SQLite
+### Elasticsearch Client
 
 ```crystal
-require "db"
-require "sqlite3"
+# src/elasticsearch/client.cr
+require "http/client"
+require "json"
+require "uri"
 
-# File-based database
-DB.open("sqlite3://./myapp.db") do |db|
-  puts "Connected to SQLite"
-end
-
-# In-memory database (ข้อมูลหายเมื่อปิด connection)
-DB.open("sqlite3://:memory:") do |db|
-  puts "Connected to in-memory SQLite"
-end
-
-# Persistent connection
-DATABASE = DB.open("sqlite3://./data/myapp.db")
-at_exit { DATABASE.close }
-```
-
-## CRUD พื้นฐาน
-
-```crystal
-require "db"
-require "sqlite3"
-
-struct Note
-  include DB::Serializable
-
-  property id : Int64
-  property title : String
-  property content : String
-  property tags : String  # SQLite ไม่มี array type - ใช้ comma-separated
-  property pinned : Bool
-  property created_at : Time
-  property updated_at : Time
-end
-
-DB.open("sqlite3://./notes.db") do |db|
-
-  # Pragmas สำหรับ performance
-  db.exec("PRAGMA journal_mode = WAL")
-  db.exec("PRAGMA synchronous = NORMAL")
-  db.exec("PRAGMA cache_size = -64000")  # 64MB cache
-  db.exec("PRAGMA foreign_keys = ON")
-
-  # CREATE TABLE
-  db.exec <<-SQL
-    CREATE TABLE IF NOT EXISTS notes (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      title TEXT NOT NULL,
-      content TEXT NOT NULL DEFAULT '',
-      tags TEXT NOT NULL DEFAULT '',
-      pinned INTEGER NOT NULL DEFAULT 0,
-      created_at DATETIME NOT NULL DEFAULT (datetime('now')),
-      updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
-    )
-  SQL
-
-  db.exec("CREATE INDEX IF NOT EXISTS idx_notes_pinned ON notes(pinned)")
-
-  # INSERT
-  result = db.exec(
-    "INSERT INTO notes (title, content, tags) VALUES (?, ?, ?)",
-    "Crystal Notes", "Crystal is amazing!", "crystal,programming"
+class ElasticsearchClient
+  class Error < Exception; end
+  class NotFoundError < Error; end
+  class IndexError < Error; end
+  
+  property host : String
+  property port : Int32
+  property scheme : String
+  
+  def initialize(
+    @host : String = "localhost",
+    @port : Int32 = 9200,
+    @scheme : String = "http",
+    @username : String? = nil,
+    @password : String? = nil
   )
-  puts "Inserted ID: #{result.last_insert_id}"
-
-  # SELECT
-  notes = db.query_all(
-    "SELECT * FROM notes ORDER BY pinned DESC, created_at DESC",
-    as: Note
-  )
-  notes.each { |n| puts "#{n.id}: #{n.title}" }
-
-  # SELECT ONE
-  note = db.query_one?("SELECT * FROM notes WHERE id = ?", 1_i64, as: Note)
-  puts note.try(&.title) || "Not found"
-
-  # UPDATE
-  db.exec(
-    "UPDATE notes SET title = ?, updated_at = datetime('now') WHERE id = ?",
-    "Updated Title", 1_i64
-  )
-
-  # DELETE
-  db.exec("DELETE FROM notes WHERE id = ?", 99_i64)
-
+  end
+  
+  # GET request
+  def get(path : String, params : Hash(String, String) = {} of String => String) : JSON::Any
+    response = http_client.get(build_url(path, params), headers: default_headers)
+    handle_response(response)
+  end
+  
+  # POST request
+  def post(path : String, body : JSON::Any | Hash | NamedTuple | Nil = nil) : JSON::Any
+    response = http_client.post(
+      build_url(path),
+      headers: default_headers,
+      body: body.try(&.to_json)
+    )
+    handle_response(response)
+  end
+  
+  # PUT request
+  def put(path : String, body : JSON::Any | Hash | NamedTuple | Nil = nil) : JSON::Any
+    response = http_client.put(
+      build_url(path),
+      headers: default_headers,
+      body: body.try(&.to_json)
+    )
+    handle_response(response)
+  end
+  
+  # DELETE request
+  def delete(path : String) : JSON::Any
+    response = http_client.delete(build_url(path), headers: default_headers)
+    handle_response(response)
+  end
+  
+  # ตรวจสอบ health
+  def health : NamedTuple(status: String, cluster_name: String, nodes: Int32)
+    result = get("/_cluster/health")
+    {
+      status: result["status"].as_s,
+      cluster_name: result["cluster_name"].as_s,
+      nodes: result["number_of_nodes"].as_i
+    }
+  end
+  
+  # ตรวจสอบ connection
+  def ping : Bool
+    response = http_client.head(build_url("/"))
+    response.success?
+  rescue
+    false
+  end
+  
+  private def http_client : HTTP::Client
+    client = HTTP::Client.new(@host, @port, @scheme == "https")
+    
+    if username = @username
+      password = @password || ""
+      client.basic_auth(username, password)
+    end
+    
+    client.connect_timeout = 5.seconds
+    client.read_timeout = 30.seconds
+    client
+  end
+  
+  private def default_headers : HTTP::Headers
+    HTTP::Headers{
+      "Content-Type" => "application/json",
+      "Accept" => "application/json"
+    }
+  end
+  
+  private def build_url(path : String, params : Hash(String, String) = {} of String => String) : String
+    url = "#{@scheme}://#{@host}:#{@port}#{path}"
+    unless params.empty?
+      query = URI::Params.build { |p| params.each { |k, v| p.add(k, v) } }
+      url += "?#{query}"
+    end
+    url
+  end
+  
+  private def handle_response(response : HTTP::Client::Response) : JSON::Any
+    body = response.body.presence
+    result = body ? JSON.parse(body) : JSON::Any.new(nil)
+    
+    case response.status_code
+    when 200, 201
+      result
+    when 404
+      raise NotFoundError.new("ไม่พบ resource: #{response.body}")
+    when 400..499
+      error = result["error"]?.try(&.["reason"]?.try(&.as_s)) || response.body
+      raise Error.new("Client Error #{response.status_code}: #{error}")
+    when 500..599
+      raise Error.new("Server Error #{response.status_code}: #{response.body}")
+    else
+      result
+    end
+  end
 end
 ```
 
-## SQLite Pragmas
+## Index Management
+
+### การสร้างและจัดการ Index
 
 ```crystal
-require "db"
-require "sqlite3"
-
-DB.open("sqlite3://./app.db") do |db|
-
-  # Performance pragmas
-  db.exec("PRAGMA journal_mode = WAL")      # Write-Ahead Logging - ดีที่สุดสำหรับ web apps
-  db.exec("PRAGMA synchronous = NORMAL")    # Balance performance/safety
-  db.exec("PRAGMA cache_size = -32000")     # 32MB page cache
-  db.exec("PRAGMA temp_store = MEMORY")     # Temp tables in RAM
-  db.exec("PRAGMA mmap_size = 268435456")   # Memory-mapped I/O 256MB
-
-  # Security pragmas
-  db.exec("PRAGMA foreign_keys = ON")       # Enforce foreign key constraints
-
-  # Read pragmas
-  journal = db.query_one("PRAGMA journal_mode", as: String)
-  puts "Journal mode: #{journal}"
-
-  page_size = db.query_one("PRAGMA page_size", as: Int32)
-  puts "Page size: #{page_size}"
-
-  db_size = db.query_one("PRAGMA page_count", as: Int32) * page_size
-  puts "Database size: #{db_size} bytes"
-
-  # Analyze (update query planner statistics)
-  db.exec("ANALYZE")
-
-  # Vacuum (defragment database)
-  db.exec("VACUUM")
-
+# src/elasticsearch/index_manager.cr
+class IndexManager
+  def initialize(@client : ElasticsearchClient)
+  end
+  
+  # ตรวจสอบว่า index มีอยู่หรือไม่
+  def index_exists?(index_name : String) : Bool
+    @client.get("/#{index_name}")
+    true
+  rescue ElasticsearchClient::NotFoundError
+    false
+  end
+  
+  # สร้าง index สำหรับบทความ
+  def create_articles_index
+    mapping = {
+      "settings" => {
+        "number_of_shards" => 1,
+        "number_of_replicas" => 0,
+        "analysis" => {
+          "analyzer" => {
+            "thai_analyzer" => {
+              "type" => "custom",
+              "tokenizer" => "standard",
+              "filter" => ["lowercase", "stop"]
+            },
+            "autocomplete_analyzer" => {
+              "type" => "custom",
+              "tokenizer" => "standard",
+              "filter" => ["lowercase", "edge_ngram_filter"]
+            },
+            "autocomplete_search_analyzer" => {
+              "type" => "custom",
+              "tokenizer" => "standard",
+              "filter" => ["lowercase"]
+            }
+          },
+          "filter" => {
+            "edge_ngram_filter" => {
+              "type" => "edge_ngram",
+              "min_gram" => 1,
+              "max_gram" => 20
+            }
+          }
+        }
+      },
+      "mappings" => {
+        "properties" => {
+          "id" => {"type" => "keyword"},
+          "title" => {
+            "type" => "text",
+            "analyzer" => "standard",
+            "fields" => {
+              "keyword" => {"type" => "keyword"},
+              "autocomplete" => {
+                "type" => "text",
+                "analyzer" => "autocomplete_analyzer",
+                "search_analyzer" => "autocomplete_search_analyzer"
+              }
+            }
+          },
+          "content" => {
+            "type" => "text",
+            "analyzer" => "standard"
+          },
+          "author" => {
+            "type" => "text",
+            "fields" => {
+              "keyword" => {"type" => "keyword"}
+            }
+          },
+          "tags" => {"type" => "keyword"},
+          "status" => {"type" => "keyword"},
+          "category" => {"type" => "keyword"},
+          "views" => {"type" => "integer"},
+          "rating" => {"type" => "float"},
+          "published_at" => {"type" => "date"},
+          "created_at" => {"type" => "date"}
+        }
+      }
+    }
+    
+    if index_exists?("articles")
+      puts "Index 'articles' มีอยู่แล้ว"
+      return
+    end
+    
+    result = @client.put("/articles", mapping)
+    puts "สร้าง index 'articles' สำเร็จ: #{result["acknowledged"]}"
+  end
+  
+  # ลบ index
+  def delete_index(index_name : String) : Bool
+    @client.delete("/#{index_name}")
+    puts "ลบ index '#{index_name}' สำเร็จ"
+    true
+  rescue ElasticsearchClient::NotFoundError
+    puts "ไม่พบ index '#{index_name}'"
+    false
+  end
+  
+  # Reindex - สร้าง index ใหม่จาก index เดิม
+  def reindex(source : String, destination : String) : Int64
+    result = @client.post("/_reindex", {
+      "source" => {"index" => source},
+      "dest"   => {"index" => destination}
+    })
+    result["total"].as_i64
+  end
+  
+  # ดู mapping ของ index
+  def get_mapping(index_name : String) : JSON::Any
+    @client.get("/#{index_name}/_mapping")
+  end
+  
+  # อัปเดต settings ของ index
+  def update_settings(index_name : String, settings : Hash)
+    @client.put("/#{index_name}/_settings", settings)
+  end
 end
 ```
 
-## In-Memory Database
+## Indexing Documents
+
+### การ Index เอกสาร
 
 ```crystal
-require "db"
-require "sqlite3"
-
-# In-memory database เหมาะสำหรับ testing และ caching
-class InMemoryCache
-  def initialize
-    @db = DB.open("sqlite3://:memory:")
-    setup_schema
+# src/elasticsearch/document_indexer.cr
+class DocumentIndexer
+  def initialize(@client : ElasticsearchClient)
   end
-
-  def finalize
-    @db.close
+  
+  # Index เอกสารเดียว
+  def index_article(article : Article) : Bool
+    doc = {
+      "id" => article.id,
+      "title" => article.title,
+      "content" => article.content,
+      "author" => article.author,
+      "tags" => article.tags,
+      "status" => article.status,
+      "category" => article.category,
+      "views" => article.views,
+      "rating" => article.rating,
+      "published_at" => article.published_at.try(&.to_rfc3339),
+      "created_at" => article.created_at.to_rfc3339
+    }
+    
+    result = @client.put("/articles/_doc/#{article.id}", doc)
+    result["result"].as_s.in?("created", "updated")
   end
-
-  private def setup_schema
-    @db.exec <<-SQL
-      CREATE TABLE cache_entries (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL,
-        expires_at INTEGER,
-        created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
-      )
-    SQL
-  end
-
-  def set(key : String, value : String, ttl_seconds : Int32? = nil)
-    expires_at = ttl_seconds ? Time.local.to_unix + ttl_seconds : nil
-
-    @db.exec(
-      <<-SQL,
-        INSERT INTO cache_entries (key, value, expires_at)
-        VALUES (?, ?, ?)
-        ON CONFLICT(key) DO UPDATE SET
-          value = excluded.value,
-          expires_at = excluded.expires_at,
-          created_at = strftime('%s', 'now')
-      SQL
-      key, value, expires_at
-    )
-  end
-
-  def get(key : String) : String?
-    now = Time.local.to_unix
-
-    entry = @db.query_one?(
-      "SELECT value, expires_at FROM cache_entries WHERE key = ?",
-      key,
-      as: {value: String, expires_at: Int64?}
-    )
-
-    return nil unless entry
-
-    # ตรวจสอบ expiration
-    if exp = entry[:expires_at]
-      if now > exp
-        delete(key)
-        return nil
+  
+  # Bulk Index - เพิ่มหลายเอกสารพร้อมกัน
+  def bulk_index(articles : Array(Article)) : NamedTuple(indexed: Int32, errors: Int32)
+    return {indexed: 0, errors: 0} if articles.empty?
+    
+    # สร้าง bulk request body
+    bulk_body = String.build do |sb|
+      articles.each do |article|
+        # Action line
+        sb << {"index" => {"_index" => "articles", "_id" => article.id}}.to_json
+        sb << "\n"
+        
+        # Document line
+        sb << {
+          "id" => article.id,
+          "title" => article.title,
+          "content" => article.content,
+          "author" => article.author,
+          "tags" => article.tags,
+          "status" => article.status,
+          "views" => article.views,
+          "created_at" => article.created_at.to_rfc3339
+        }.to_json
+        sb << "\n"
       end
     end
-
-    entry[:value]
-  end
-
-  def delete(key : String)
-    @db.exec("DELETE FROM cache_entries WHERE key = ?", key)
-  end
-
-  def cleanup_expired
-    @db.exec(
-      "DELETE FROM cache_entries WHERE expires_at IS NOT NULL AND expires_at < ?",
-      Time.local.to_unix
+    
+    # ส่ง bulk request
+    response = HTTP::Client.new("localhost", 9200).post(
+      "/_bulk",
+      headers: HTTP::Headers{"Content-Type" => "application/x-ndjson"},
+      body: bulk_body
     )
-  end
-
-  def stats : NamedTuple(total: Int64, expired: Int64)
-    now = Time.local.to_unix
-    total = @db.query_one("SELECT COUNT(*) FROM cache_entries", as: Int64)
-    expired = @db.query_one(
-      "SELECT COUNT(*) FROM cache_entries WHERE expires_at IS NOT NULL AND expires_at < ?",
-      now, as: Int64
-    )
-    {total: total, expired: expired}
-  end
-end
-
-# ใช้งาน
-cache = InMemoryCache.new
-
-cache.set("user:1", {"name" => "สมชาย", "role" => "admin"}.to_json, ttl_seconds: 300)
-cache.set("config:theme", "dark")  # ไม่มี TTL
-
-if value = cache.get("user:1")
-  user = JSON.parse(value)
-  puts "User: #{user["name"]}"
-end
-
-stats = cache.stats
-puts "Cache: #{stats[:total]} entries, #{stats[:expired]} expired"
-```
-
-## Transactions และ WAL Mode
-
-```crystal
-require "db"
-require "sqlite3"
-
-DB.open("sqlite3://./app.db") do |db|
-
-  db.exec("PRAGMA journal_mode = WAL")
-  db.exec("PRAGMA foreign_keys = ON")
-
-  # Transaction พื้นฐาน
-  db.transaction do |tx|
-    cnn = tx.connection
-
-    user_id = cnn.query_one(
-      "INSERT INTO users (name, email) VALUES (?, ?) RETURNING id",
-      "สมชาย", "somchai@example.com",
-      as: Int64
-    )
-
-    cnn.exec(
-      "INSERT INTO user_profiles (user_id, bio) VALUES (?, ?)",
-      user_id, ""
-    )
-
-    puts "Created user #{user_id}"
-  end
-
-  # Exclusive transaction สำหรับ heavy write
-  db.exec("BEGIN EXCLUSIVE")
-  begin
-    db.exec("UPDATE counter SET value = value + 1 WHERE key = 'visits'")
-    db.exec("COMMIT")
-  rescue ex
-    db.exec("ROLLBACK")
-    puts "Error: #{ex.message}"
-  end
-
-  # Deferred transaction (default)
-  db.exec("BEGIN DEFERRED")
-  begin
-    rows = db.query_all("SELECT id FROM items WHERE needs_update = 1", as: Int64)
-    rows.each do |id|
-      db.exec("UPDATE items SET processed = 1 WHERE id = ?", id)
+    
+    result = JSON.parse(response.body)
+    
+    indexed = 0
+    errors = 0
+    
+    result["items"].as_a.each do |item|
+      action = item["index"]
+      if action["error"]?
+        errors += 1
+        puts "Error indexing #{action["_id"]}: #{action["error"]["reason"]}"
+      else
+        indexed += 1
+      end
     end
-    db.exec("COMMIT")
-  rescue
-    db.exec("ROLLBACK")
+    
+    {indexed: indexed, errors: errors}
   end
-
+  
+  # ลบเอกสาร
+  def delete_document(index : String, id : String) : Bool
+    @client.delete("/#{index}/_doc/#{id}")
+    true
+  rescue ElasticsearchClient::NotFoundError
+    false
+  end
+  
+  # อัปเดตเอกสาร (Partial Update)
+  def update_document(index : String, id : String, fields : Hash) : Bool
+    result = @client.post("/#{index}/_update/#{id}", {
+      "doc" => fields,
+      "doc_as_upsert" => true
+    })
+    result["result"].as_s.in?("updated", "created", "noop")
+  end
 end
 ```
 
-## Full-text Search ด้วย FTS5
+## Full-Text Search
+
+### Search Engine สำหรับบทความ
 
 ```crystal
-require "db"
-require "sqlite3"
-
-DB.open("sqlite3://./search.db") do |db|
-
-  # สร้าง FTS5 virtual table
-  db.exec <<-SQL
-    CREATE VIRTUAL TABLE IF NOT EXISTS articles_fts USING fts5(
-      title,
-      content,
-      tokenize = "unicode61"
-    )
-  SQL
-
-  # Insert
-  db.exec(
-    "INSERT INTO articles_fts (rowid, title, content) VALUES (?, ?, ?)",
-    1_i64, "Crystal Programming", "Crystal is a fast, compiled programming language"
-  )
-
-  db.exec(
-    "INSERT INTO articles_fts (rowid, title, content) VALUES (?, ?, ?)",
-    2_i64, "Ruby vs Crystal", "Crystal has Ruby-like syntax but compiles to native code"
-  )
-
-  # Search
-  results = db.query_all(
-    "SELECT rowid, title, snippet(articles_fts, 1, '<b>', '</b>', '...', 20) as excerpt FROM articles_fts WHERE articles_fts MATCH ? ORDER BY rank",
-    "crystal programming",
-    as: {rowid: Int64, title: String, excerpt: String}
-  )
-
-  results.each do |r|
-    puts "#{r[:title]}: #{r[:excerpt]}"
+# src/elasticsearch/searcher.cr
+class ArticleSearcher
+  record SearchResult,
+    id : String,
+    title : String,
+    author : String,
+    tags : Array(String),
+    score : Float64,
+    highlight : Hash(String, Array(String))
+  
+  record SearchResponse,
+    hits : Array(SearchResult),
+    total : Int64,
+    took_ms : Int32,
+    max_score : Float64?
+  
+  def initialize(@client : ElasticsearchClient)
   end
-
-  # Phrase search
-  phrase_results = db.query_all(
-    "SELECT rowid, title FROM articles_fts WHERE articles_fts MATCH ? ORDER BY rank",
-    '"crystal language"',  # ใส่ quotes สำหรับ phrase search
-    as: {rowid: Int64, title: String}
-  )
-
-  # Prefix search
-  prefix_results = db.query_all(
-    "SELECT rowid, title FROM articles_fts WHERE articles_fts MATCH ?",
-    "crys*",  # prefix
-    as: {rowid: Int64, title: String}
-  )
-
-end
-```
-
-## แบบฝึกหัด
-
-### แบบฝึกหัดที่ 1: Local Task Manager
-
-```crystal
-require "db"
-require "sqlite3"
-require "json"
-
-struct Task
-  include DB::Serializable
-
-  property id : Int64
-  property title : String
-  property description : String
-  property status : String
-  property priority : Int32
-  property due_date : String?
-  property tags : String
-  property created_at : Time
-  property completed_at : Time?
-
-  def tag_list : Array(String)
-    tags.split(",").map(&.strip).reject(&.empty?)
+  
+  # ค้นหาพื้นฐาน
+  def search(
+    query : String,
+    page : Int32 = 1,
+    per_page : Int32 = 10,
+    filters : Hash(String, String) = {} of String => String
+  ) : SearchResponse
+    from = (page - 1) * per_page
+    
+    # สร้าง query
+    must_clauses = [] of Hash(String, JSON::Any)
+    
+    # Multi-match query
+    must_clauses << {
+      "multi_match" => JSON.parse({
+        "query" => query,
+        "fields" => ["title^3", "content^1", "author^2", "tags^2"],
+        "type" => "best_fields",
+        "fuzziness" => "AUTO",
+        "minimum_should_match" => "75%"
+      }.to_json)
+    }
+    
+    # Filter clauses
+    filter_clauses = [] of Hash(String, JSON::Any)
+    filters.each do |field, value|
+      filter_clauses << {"term" => JSON.parse({field => value}.to_json)}
+    end
+    
+    # สร้าง request body
+    request_body = {
+      "from" => from,
+      "size" => per_page,
+      "query" => {
+        "bool" => {
+          "must" => must_clauses,
+          "filter" => filter_clauses
+        }
+      },
+      "highlight" => {
+        "pre_tags" => ["<mark>"],
+        "post_tags" => ["</mark>"],
+        "fields" => {
+          "title" => {"number_of_fragments" => 1},
+          "content" => {"number_of_fragments" => 3, "fragment_size" => 150}
+        }
+      },
+      "sort" => [
+        {"_score" => "desc"},
+        {"created_at" => "desc"}
+      ]
+    }
+    
+    result = @client.post("/articles/_search", request_body)
+    parse_search_response(result)
   end
-end
-
-class TaskManager
-  def initialize(db_path : String = "./tasks.db")
-    @db = DB.open("sqlite3://#{db_path}")
-    setup
+  
+  # Advanced Search ด้วย Filter ซับซ้อน
+  def advanced_search(
+    query : String? = nil,
+    tags : Array(String) = [] of String,
+    author : String? = nil,
+    date_from : Time? = nil,
+    date_to : Time? = nil,
+    min_rating : Float64? = nil,
+    sort : String = "relevance",
+    page : Int32 = 1,
+    per_page : Int32 = 10
+  ) : SearchResponse
+    from = (page - 1) * per_page
+    
+    bool_query = {} of String => Array(Hash)
+    
+    # Must clauses
+    must = [] of Hash(String, JSON::Any)
+    if query && !query.empty?
+      must << {
+        "multi_match" => JSON.parse({
+          "query" => query,
+          "fields" => ["title^3", "content", "author^2"],
+          "type" => "most_fields"
+        }.to_json)
+      }
+    else
+      must << {"match_all" => JSON.parse("{}".to_json)}
+    end
+    
+    # Filter clauses
+    filter = [] of Hash(String, JSON::Any)
+    
+    # Filter by tags
+    unless tags.empty?
+      filter << {
+        "terms" => JSON.parse({"tags" => tags}.to_json)
+      }
+    end
+    
+    # Filter by author
+    if author
+      filter << {
+        "term" => JSON.parse({"author.keyword" => author}.to_json)
+      }
+    end
+    
+    # Filter by date range
+    if date_from || date_to
+      range_filter = {} of String => String
+      range_filter["gte"] = date_from.try(&.to_rfc3339) || ""
+      range_filter["lte"] = date_to.try(&.to_rfc3339) || ""
+      range_filter.reject! { |_, v| v.empty? }
+      
+      filter << {
+        "range" => JSON.parse({"published_at" => range_filter}.to_json)
+      }
+    end
+    
+    # Filter by rating
+    if min_rating
+      filter << {
+        "range" => JSON.parse({"rating" => {"gte" => min_rating}}.to_json)
+      }
+    end
+    
+    # Sort
+    sort_clause = case sort
+                  when "relevance" then [{"_score" => "desc"}]
+                  when "newest"    then [{"created_at" => "desc"}]
+                  when "oldest"    then [{"created_at" => "asc"}]
+                  when "popular"   then [{"views" => "desc"}]
+                  when "rating"    then [{"rating" => "desc"}]
+                  else              [{"_score" => "desc"}]
+                  end
+    
+    request_body = {
+      "from" => from,
+      "size" => per_page,
+      "query" => {
+        "bool" => {
+          "must"   => must,
+          "filter" => filter
+        }
+      },
+      "highlight" => {
+        "fields" => {
+          "title"   => {"number_of_fragments" => 0},
+          "content" => {"fragment_size" => 150, "number_of_fragments" => 3}
+        }
+      },
+      "sort" => sort_clause,
+      "aggs" => {
+        "tags" => {
+          "terms" => {"field" => "tags", "size" => 20}
+        },
+        "authors" => {
+          "terms" => {"field" => "author.keyword", "size" => 10}
+        }
+      }
+    }
+    
+    result = @client.post("/articles/_search", request_body)
+    parse_search_response(result)
   end
-
-  def finalize
-    @db.close
-  end
-
-  private def setup
-    @db.exec("PRAGMA journal_mode = WAL")
-    @db.exec("PRAGMA foreign_keys = ON")
-
-    @db.exec <<-SQL
-      CREATE TABLE IF NOT EXISTS tasks (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        title TEXT NOT NULL,
-        description TEXT NOT NULL DEFAULT '',
-        status TEXT NOT NULL DEFAULT 'todo' CHECK(status IN ('todo','in_progress','done','cancelled')),
-        priority INTEGER NOT NULL DEFAULT 2 CHECK(priority BETWEEN 1 AND 5),
-        due_date TEXT,
-        tags TEXT NOT NULL DEFAULT '',
-        created_at DATETIME NOT NULL DEFAULT (datetime('now')),
-        completed_at DATETIME
+  
+  private def parse_search_response(result : JSON::Any) : SearchResponse
+    hits_data = result["hits"]
+    total = hits_data["total"]["value"].as_i64
+    took_ms = result["took"].as_i
+    max_score = hits_data["max_score"].as_f? 
+    
+    hits = hits_data["hits"].as_a.map do |hit|
+      source = hit["_source"]
+      
+      highlights = {} of String => Array(String)
+      if highlight = hit["highlight"]?
+        highlight.as_h.each do |field, fragments|
+          highlights[field] = fragments.as_a.map(&.as_s)
+        end
+      end
+      
+      SearchResult.new(
+        id: source["id"].as_s,
+        title: source["title"].as_s,
+        author: source["author"].as_s,
+        tags: source["tags"].as_a.map(&.as_s),
+        score: hit["_score"].as_f,
+        highlight: highlights
       )
-    SQL
-
-    @db.exec("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)")
-    @db.exec("CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority DESC)")
-  end
-
-  def add(title : String, description : String = "", priority : Int32 = 2, tags : Array(String) = [] of String, due_date : String? = nil) : Task
-    result = @db.exec(
-      "INSERT INTO tasks (title, description, priority, tags, due_date) VALUES (?, ?, ?, ?, ?)",
-      title, description, priority, tags.join(","), due_date
-    )
-    @db.query_one("SELECT * FROM tasks WHERE id = ?", result.last_insert_id, as: Task)
-  end
-
-  def list(status : String? = nil, priority : Int32? = nil) : Array(Task)
-    conditions = [] of String
-    args = [] of DB::Any
-
-    if status
-      conditions << "status = ?"
-      args << status
     end
-
-    if priority
-      conditions << "priority = ?"
-      args << priority
-    end
-
-    where_clause = conditions.empty? ? "" : "WHERE #{conditions.join(" AND ")}"
-
-    @db.query_all(
-      "SELECT * FROM tasks #{where_clause} ORDER BY priority DESC, created_at DESC",
-      *args,
-      as: Task
-    )
-  end
-
-  def complete(id : Int64) : Bool
-    result = @db.exec(
-      "UPDATE tasks SET status = 'done', completed_at = datetime('now') WHERE id = ? AND status != 'done'",
-      id
-    )
-    result.rows_affected > 0
-  end
-
-  def delete(id : Int64) : Bool
-    result = @db.exec("DELETE FROM tasks WHERE id = ?", id)
-    result.rows_affected > 0
-  end
-
-  def stats : NamedTuple(total: Int64, todo: Int64, in_progress: Int64, done: Int64)
-    row = @db.query_one(
-      <<-SQL,
-        SELECT
-          COUNT(*) as total,
-          SUM(CASE WHEN status = 'todo' THEN 1 ELSE 0 END) as todo,
-          SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) as in_progress,
-          SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) as done
-        FROM tasks
-      SQL
-      as: {total: Int64, todo: Int64, in_progress: Int64, done: Int64}
-    )
-    row
-  end
-
-  def search(query : String) : Array(Task)
-    pattern = "%#{query}%"
-    @db.query_all(
-      "SELECT * FROM tasks WHERE title LIKE ? OR description LIKE ? OR tags LIKE ? ORDER BY priority DESC",
-      pattern, pattern, pattern,
-      as: Task
+    
+    SearchResponse.new(
+      hits: hits,
+      total: total,
+      took_ms: took_ms,
+      max_score: max_score
     )
   end
 end
+```
 
-# ใช้งาน
-mgr = TaskManager.new
+## Aggregations
 
-t1 = mgr.add("เรียน Crystal", "อ่าน documentation", priority: 5, tags: ["learning", "crystal"])
-t2 = mgr.add("สร้าง API", "REST API ด้วย Kemal", priority: 4, due_date: "2026-12-31")
-t3 = mgr.add("ทำ homework", priority: 3, tags: ["school"])
+### การวิเคราะห์ข้อมูลด้วย Aggregations
 
-puts "Tasks:"
-mgr.list.each { |t| puts "  [#{t.status}] P#{t.priority} - #{t.title}" }
+```crystal
+# src/elasticsearch/aggregation_analyzer.cr
+class AggregationAnalyzer
+  def initialize(@client : ElasticsearchClient)
+  end
+  
+  # สถิติตาม category
+  def category_stats : Array(NamedTuple(category: String, count: Int64, avg_views: Float64))
+    request = {
+      "size" => 0,
+      "aggs" => {
+        "by_category" => {
+          "terms" => {
+            "field" => "category",
+            "size" => 50
+          },
+          "aggs" => {
+            "avg_views" => {
+              "avg" => {"field" => "views"}
+            }
+          }
+        }
+      }
+    }
+    
+    result = @client.post("/articles/_search", request)
+    buckets = result["aggregations"]["by_category"]["buckets"].as_a
+    
+    buckets.map do |bucket|
+      {
+        category: bucket["key"].as_s,
+        count: bucket["doc_count"].as_i64,
+        avg_views: bucket["avg_views"]["value"].as_f
+      }
+    end
+  end
+  
+  # Timeline สำหรับ date histogram
+  def publication_timeline(interval : String = "month") : Array(NamedTuple(date: String, count: Int64))
+    request = {
+      "size" => 0,
+      "aggs" => {
+        "publications_over_time" => {
+          "date_histogram" => {
+            "field" => "published_at",
+            "calendar_interval" => interval,
+            "format" => "yyyy-MM"
+          }
+        }
+      }
+    }
+    
+    result = @client.post("/articles/_search", request)
+    buckets = result["aggregations"]["publications_over_time"]["buckets"].as_a
+    
+    buckets.map do |bucket|
+      {
+        date: bucket["key_as_string"].as_s,
+        count: bucket["doc_count"].as_i64
+      }
+    end
+  end
+  
+  # Percentile ของ views
+  def views_percentiles : Hash(String, Float64)
+    request = {
+      "size" => 0,
+      "aggs" => {
+        "views_percentiles" => {
+          "percentiles" => {
+            "field" => "views",
+            "percents" => [25, 50, 75, 90, 95, 99]
+          }
+        },
+        "views_stats" => {
+          "stats" => {"field" => "views"}
+        }
+      }
+    }
+    
+    result = @client.post("/articles/_search", request)
+    percentiles = result["aggregations"]["views_percentiles"]["values"].as_h
+    
+    percentiles.transform_values(&.as_f)
+  end
+  
+  # Geospatial aggregation (ถ้ามี geo field)
+  def geographic_distribution : Array(NamedTuple(country: String, count: Int64))
+    request = {
+      "size" => 0,
+      "aggs" => {
+        "by_country" => {
+          "terms" => {
+            "field" => "country",
+            "size" => 100,
+            "order" => {"_count" => "desc"}
+          }
+        }
+      }
+    }
+    
+    result = @client.post("/articles/_search", request)
+    buckets = result["aggregations"]["by_country"]["buckets"].as_a
+    
+    buckets.map do |bucket|
+      {
+        country: bucket["key"].as_s,
+        count: bucket["doc_count"].as_i64
+      }
+    end
+  end
+end
+```
 
-mgr.complete(t1.id)
+## Autocomplete Implementation
 
-stats = mgr.stats
-puts "\nStats: #{stats[:total]} total, #{stats[:todo]} todo, #{stats[:done]} done"
+### Autocomplete Service
 
-puts "\nSearch 'crystal':"
-mgr.search("crystal").each { |t| puts "  #{t.title}" }
+```crystal
+# src/elasticsearch/autocomplete.cr
+class AutocompleteService
+  def initialize(@client : ElasticsearchClient)
+  end
+  
+  # Autocomplete ด้วย Edge NGram
+  def suggest(prefix : String, limit : Int32 = 10) : Array(String)
+    request = {
+      "size" => limit,
+      "_source" => ["title"],
+      "query" => {
+        "multi_match" => {
+          "query" => prefix,
+          "type" => "bool_prefix",
+          "fields" => ["title", "title._2gram", "title._3gram"]
+        }
+      }
+    }
+    
+    result = @client.post("/articles/_search", request)
+    result["hits"]["hits"].as_a.map { |hit| hit["_source"]["title"].as_s }
+  end
+  
+  # Suggest ด้วย Completion Suggester
+  def complete(prefix : String, size : Int32 = 5) : Array(NamedTuple(text: String, score: Float64))
+    request = {
+      "suggest" => {
+        "title_suggest" => {
+          "prefix" => prefix,
+          "completion" => {
+            "field" => "title.suggest",
+            "size" => size,
+            "skip_duplicates" => true,
+            "fuzzy" => {
+              "fuzziness" => 1
+            }
+          }
+        }
+      }
+    }
+    
+    result = @client.post("/articles/_search", request)
+    
+    options = result["suggest"]["title_suggest"][0]["options"].as_a
+    options.map do |opt|
+      {
+        text: opt["text"].as_s,
+        score: opt["_score"].as_f
+      }
+    end
+  end
+  
+  # Search As You Type
+  def search_as_you_type(text : String, limit : Int32 = 8) : Array(String)
+    request = {
+      "size" => limit,
+      "_source" => ["title"],
+      "query" => {
+        "multi_match" => {
+          "query" => text,
+          "type" => "bool_prefix",
+          "fields" => [
+            "title",
+            "title._2gram",
+            "title._3gram",
+            "title._index_prefix"
+          ]
+        }
+      }
+    }
+    
+    result = @client.post("/articles/_search", request)
+    result["hits"]["hits"].as_a.map { |hit| hit["_source"]["title"].as_s }
+  end
+  
+  # Did You Mean - การแนะนำคำที่ใกล้เคียง
+  def did_you_mean(query : String) : Array(String)
+    request = {
+      "suggest" => {
+        "text" => query,
+        "did_you_mean" => {
+          "phrase" => {
+            "field" => "content",
+            "size" => 3,
+            "gram_size" => 3,
+            "direct_generator" => [{
+              "field" => "content",
+              "suggest_mode" => "missing"
+            }],
+            "highlight" => {
+              "pre_tag" => "<em>",
+              "post_tag" => "</em>"
+            }
+          }
+        }
+      }
+    }
+    
+    result = @client.post("/articles/_search", request)
+    
+    options = result["suggest"]["did_you_mean"][0]["options"].as_a
+    options.map { |opt| opt["text"].as_s }
+  end
+end
+```
+
+## Real-World Search Feature
+
+### Search API สำหรับ Web Application
+
+```crystal
+# src/api/search_controller.cr
+require "http/server"
+require "json"
+require "../elasticsearch/client"
+require "../elasticsearch/searcher"
+require "../elasticsearch/autocomplete"
+
+class SearchController
+  def initialize
+    @es_client = ElasticsearchClient.new(
+      host: ENV.fetch("ES_HOST", "localhost"),
+      port: ENV.fetch("ES_PORT", "9200").to_i
+    )
+    @searcher = ArticleSearcher.new(@es_client)
+    @autocomplete = AutocompleteService.new(@es_client)
+    @indexer = DocumentIndexer.new(@es_client)
+    @analytics = AggregationAnalyzer.new(@es_client)
+  end
+  
+  # GET /api/search?q=query&page=1&per_page=10
+  def search(context : HTTP::Server::Context)
+    params = context.request.query_params
+    
+    query    = params["q"]? || ""
+    page     = params["page"]?.try(&.to_i) || 1
+    per_page = params["per_page"]?.try(&.to_i) || 10
+    status   = params["status"]?
+    author   = params["author"]?
+    
+    # Validate parameters
+    page = [page, 1].max
+    per_page = per_page.clamp(1, 100)
+    
+    filters = {} of String => String
+    filters["status"] = status if status
+    filters["author.keyword"] = author if author
+    
+    if query.empty?
+      response = {
+        "hits" => [] of Nil,
+        "total" => 0,
+        "page" => page,
+        "per_page" => per_page,
+        "message" => "กรุณาระบุคำค้นหา"
+      }
+    else
+      result = @searcher.search(query, page, per_page, filters)
+      
+      response = {
+        "hits" => result.hits.map { |hit|
+          {
+            "id" => hit.id,
+            "title" => hit.title,
+            "author" => hit.author,
+            "tags" => hit.tags,
+            "score" => hit.score,
+            "highlight" => hit.highlight
+          }
+        },
+        "total" => result.total,
+        "page" => page,
+        "per_page" => per_page,
+        "took_ms" => result.took_ms
+      }
+    end
+    
+    context.response.content_type = "application/json"
+    context.response.print(response.to_json)
+  end
+  
+  # GET /api/autocomplete?q=prefix
+  def autocomplete(context : HTTP::Server::Context)
+    prefix = context.request.query_params["q"]? || ""
+    limit  = context.request.query_params["limit"]?.try(&.to_i) || 8
+    
+    suggestions = if prefix.size >= 2
+                    @autocomplete.suggest(prefix, limit)
+                  else
+                    [] of String
+                  end
+    
+    context.response.content_type = "application/json"
+    context.response.print({"suggestions" => suggestions}.to_json)
+  end
+  
+  # GET /api/analytics/stats
+  def analytics_stats(context : HTTP::Server::Context)
+    stats = {
+      "category_stats" => @analytics.category_stats,
+      "views_percentiles" => @analytics.views_percentiles,
+      "timeline" => @analytics.publication_timeline("month")
+    }
+    
+    context.response.content_type = "application/json"
+    context.response.print(stats.to_json)
+  end
+end
+
+# เริ่ม HTTP Server
+controller = SearchController.new
+
+server = HTTP::Server.new do |context|
+  path = context.request.path
+  method = context.request.method
+  
+  case {method, path}
+  when {"GET", /^\/api\/search/}
+    controller.search(context)
+  when {"GET", /^\/api\/autocomplete/}
+    controller.autocomplete(context)
+  when {"GET", /^\/api\/analytics\/stats/}
+    controller.analytics_stats(context)
+  else
+    context.response.status = HTTP::Status::NOT_FOUND
+    context.response.print("Not Found")
+  end
+end
+
+puts "Search API กำลังทำงานที่ http://localhost:8080"
+server.listen("0.0.0.0", 8080)
+```
+
+### ตัวอย่างการใช้งาน
+
+```crystal
+# src/examples/search_demo.cr
+require "../elasticsearch/client"
+require "../elasticsearch/index_manager"
+require "../elasticsearch/document_indexer"
+require "../elasticsearch/searcher"
+require "../elasticsearch/autocomplete"
+
+# เชื่อมต่อ
+es = ElasticsearchClient.new
+puts "Elasticsearch health: #{es.health}"
+
+# ตั้งค่า index
+manager = IndexManager.new(es)
+manager.create_articles_index
+
+# Index ตัวอย่างข้อมูล
+indexer = DocumentIndexer.new(es)
+
+sample_articles = [
+  {id: "1", title: "Crystal Programming Language", content: "Crystal is a fast, compiled language...", author: "Admin", tags: ["crystal", "programming"], status: "published", views: 150},
+  {id: "2", title: "การเขียน Crystal เบื้องต้น", content: "Crystal เป็นภาษาที่มีไวยากรณ์คล้าย Ruby...", author: "สมชาย", tags: ["crystal", "tutorial", "thai"], status: "published", views: 320},
+  {id: "3", title: "Crystal กับ PostgreSQL", content: "การใช้งาน Crystal ร่วมกับฐานข้อมูล...", author: "Admin", tags: ["crystal", "database", "postgresql"], status: "published", views: 89}
+]
+
+puts "\n=== Indexing Articles ==="
+sample_articles.each do |article|
+  # ต้องสร้าง Article struct จริงๆ ในโปรเจกต์จริง
+  puts "Indexed: #{article[:title]}"
+end
+
+# ค้นหา
+searcher = ArticleSearcher.new(es)
+puts "\n=== Full-Text Search ==="
+result = searcher.search("Crystal programming")
+puts "พบ #{result.total} บทความใน #{result.took_ms}ms"
+result.hits.each do |hit|
+  puts "  [#{hit.score.round(2)}] #{hit.title} by #{hit.author}"
+  hit.highlight.each do |field, fragments|
+    puts "    #{field}: #{fragments.first}"
+  end
+end
+
+# Autocomplete
+auto = AutocompleteService.new(es)
+puts "\n=== Autocomplete ==="
+suggestions = auto.suggest("Crys")
+puts "Suggestions for 'Crys': #{suggestions.join(", ")}"
+
+# Analytics
+analyzer = AggregationAnalyzer.new(es)
+puts "\n=== Analytics ==="
+category_stats = analyzer.category_stats
+puts "Stats by category:"
+category_stats.each do |stat|
+  puts "  #{stat[:category]}: #{stat[:count]} บทความ, avg views: #{stat[:avg_views].round(1)}"
+end
 ```
 
 ## สรุป
 
 ในบทนี้เราได้เรียนรู้:
+- การสร้าง Elasticsearch client ด้วย HTTP ใน Crystal
+- การสร้างและจัดการ Index พร้อม custom analyzers
+- การ Index เอกสารทั้งแบบ single และ bulk
+- Full-Text Search ด้วย Multi-Match query
+- Advanced Search พร้อม filters, sorting และ pagination
+- Aggregations สำหรับวิเคราะห์ข้อมูล
+- Autocomplete ด้วย Edge NGram และ Completion Suggester
+- การสร้าง Search API ด้วย HTTP Server
 
-1. **crystal-sqlite3**: shard สำหรับ SQLite
-2. **Connection String**: `sqlite3://./file.db` หรือ `sqlite3://:memory:`
-3. **Pragmas**: journal_mode=WAL, foreign_keys, cache_size
-4. **AUTOINCREMENT**: primary key auto-increment
-5. **In-Memory DB**: database ใน RAM สำหรับ testing/caching
-6. **Transactions**: BEGIN/COMMIT/ROLLBACK, EXCLUSIVE
-7. **FTS5**: full-text search virtual table
-8. **ON CONFLICT**: handle duplicates (upsert)
-9. **WAL Mode**: Write-Ahead Logging สำหรับ performance
-10. **Embedded**: ไม่ต้องมี server แยก
+## ขั้นตอนต่อไป
 
-SQLite เหมาะสำหรับ: local apps, testing, prototypes, small web apps, caching
+ใน **Part 155** เราจะเรียนรู้เรื่อง **Background Jobs และ Queue** ซึ่งเป็นสิ่งสำคัญสำหรับงานที่ต้องทำในพื้นหลัง เช่น การส่งอีเมล, การประมวลผลข้อมูล และการทำงานที่ใช้เวลานาน
